@@ -619,6 +619,9 @@ class Server(BaseServer):
 
         return formatted_logs_all_set
 
+    def _sample_model_receivers(self, sample_client_num):
+        return self.sampler.sample(size=sample_client_num)
+
     def broadcast_model_para(self,
                              msg_type='model_para',
                              sample_client_num=-1,
@@ -643,7 +646,7 @@ class Server(BaseServer):
             self.sampler.change_state(self.unseen_clients_id, 'unseen')
 
         if sample_client_num > 0:
-            receiver = self.sampler.sample(size=sample_client_num)
+            receiver = self._sample_model_receivers(sample_client_num)
         else:
             # broadcast to all clients
             receiver = list(self.comm_manager.neighbors.keys())

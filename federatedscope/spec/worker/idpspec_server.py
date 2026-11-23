@@ -1,5 +1,6 @@
 import os
 import copy
+from queue import Empty
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -56,6 +57,7 @@ class idpSpecServer(baseServer):
         self.server2predictor_queue = mp.Queue()
         self.predictor2server_queue = mp.Queue()
         self.data_channel = mp.Queue()
+        self.predictor_process = None
         self.predictor = get_predictor(self._cfg, 
                                        send_channel=self.predictor2server_queue,
                                        recv_channel=self.server2predictor_queue,
@@ -70,19 +72,43 @@ class idpSpecServer(baseServer):
             self.predictor_data.update_train_data(self.aggregated_gradient[self.state])
 
     def synchronize_predictor(self, content='finish'):
+        msg, model_para = self._wait_for_predictor(content)
+        self.predictor.model.load_state_dict(model_para)
+        train_msg = {"Round": self.state - 1}
+        train_msg.update(msg)
+        self._monitor.save_formatted_results(
+            train_msg, save_file_name=self._cfg.spec.predictor.type + '_training.log')
+        logger.info(msg)
+
+    def _wait_for_predictor(self, content):
         send_flag = True
         while True:
             if not self.predictor2server_queue.empty():
-                msg, model_para = self.predictor2server_queue.get()
-                self.predictor.model.load_state_dict(model_para)
-                train_msg = {"Round": self.state - 1}
-                train_msg.update(msg)
-                self._monitor.save_formatted_results(train_msg, save_file_name=self._cfg.spec.predictor.type + '_training.log')
-                logger.info(msg)
-                break
+                return self.predictor2server_queue.get()
             elif send_flag:
                 send_flag = False
                 self.server2predictor_queue.put(content)
+            elif self.traffic_run:
+                try:
+                    return self.predictor2server_queue.get(timeout=0.1)
+                except Empty:
+                    if not self.predictor_process.is_alive():
+                        raise RuntimeError('SwiftFL Predictor exited before returning a model')
+
+    def join_traffic_predictor(self):
+        process = self.predictor_process
+        if process is None:
+            return
+        # A final prefetched result may still be in the pipe. Drain it so
+        # the child's queue feeder can flush before the process exits.
+        while process.is_alive():
+            try:
+                self.predictor2server_queue.get(timeout=0.1)
+            except Empty:
+                pass
+        process.join()
+        if process.exitcode != 0:
+            raise RuntimeError(f'SwiftFL Predictor exited with status {process.exitcode}')
 
     def spec_predict(self):
         self.synchronize_predictor()
@@ -97,8 +123,8 @@ class idpSpecServer(baseServer):
         train_data = self.predictor_data.get_train_data()
         self.data_channel.put(train_data)
         if self.state == self.start_spec_round:
-            process = mp.Process(target=self.predictor.train)
-            process.start()
+            self.predictor_process = mp.Process(target=self.predictor.train)
+            self.predictor_process.start()
             # process.join()
 
     def _start_new_training_round(self, aggregated_num=0):
@@ -245,7 +271,16 @@ class idpSpecServer(baseServer):
         move_on_flag = True  # To record whether moving to a new training
         # round or finishing the evaluation
 
-        if self.state > self.start_spec_round + 1 and self.state % self._cfg.spec.predict_freq == 0:
+        needs_spec = (self.state > self.start_spec_round + 1
+                      and self.state % self._cfg.spec.predict_freq == 0)
+        if self.traffic_run and not check_eval_result:
+            normal_buffer = self.msg_buffer['train'].get(self.state, {})
+            spec_buffer = self.spec_msg_buffer['train'].get(self.state, {})
+            self.traffic_run.observe_round(
+                self.state, normal_buffer, min_received_num, spec_buffer,
+                spec_min_received_num if needs_spec else None)
+
+        if needs_spec:
             buffer_flag = self.check_buffer(self.state, min_received_num, check_eval_result, update_waiting=False) \
                 and self.check_spec_buffer(self.state, spec_min_received_num, check_eval_result)
             if buffer_flag and not check_eval_result:
@@ -260,6 +295,11 @@ class idpSpecServer(baseServer):
                     self._perform_federated_aggregation(self.msg_buffer, self.state, self.model)
 
                 self._perform_spec()
+                if self.traffic_run:
+                    blended = (needs_spec and self.state > self.start_spec_round + self.aft_seq_length
+                               and self._cfg.spec.normal_spec_lambda != 1)
+                    self.traffic_run.aggregated(
+                        self.state, normal_buffer, spec_buffer if blended else ())
                 self.clear_buffer()
                 self.state += 1
 
@@ -408,12 +448,7 @@ class idpSpecServer(baseServer):
     def broadcast_model_para(self, msg_type='model_para', sample_client_num=-1, filter_unseen_clients=True):
 
         if sample_client_num > 0:
-            if self.state > self.start_spec_round and \
-                self.state < self._cfg.spec.recover_round :
-                receiver = self.sampler.sample(size=sample_client_num,
-                                               sample_type='random_topk')
-            else:
-                receiver = self.sampler.sample(size=sample_client_num)
+            receiver = self._sample_swiftfl_normal(sample_client_num)
         else:
             # broadcast to all clients
             receiver = list(self.comm_manager.neighbors.keys())
@@ -451,6 +486,8 @@ class idpSpecServer(baseServer):
                 eval_metrics = self.trainer.evaluate(
                     target_data_split_name=split)
                 metrics.update(**eval_metrics)
+            if self.traffic_run:
+                self.traffic_run.evaluate(self.state, metrics)
             formatted_eval_res = self._monitor.format_eval_res(
                 metrics,
                 rnd=self.state,

@@ -59,13 +59,14 @@ class Gateway:
         self.rho_history = [(0.0, rho)]
         self.events = []
         self.sequence = itertools.count()
+        self.tick = 1
         self.payload_ids = itertools.count()
         self.queues = {'normal': deque(), 'spec': deque()}
         self.access_free = {}
         self.down_free = 0.0
         self.busy = False
         self.waits = []
-        self.bytes = {'normal': 0, 'spec': 0, 'download': 0}
+        self.bytes = {'normal': 0, 'spec': 0, 'download': 0, 'access': 0}
         self.updates = []
         self.downloads = 0
 
@@ -75,33 +76,55 @@ class Gateway:
         heapq.heappush(self.events, (time, next(self.sequence), callback, args))
 
     def upload(self, client, version, kind, size, ready, done, at_gateway=False):
-        count = (size + self.chunk_bytes - 1) // self.chunk_bytes
-        payload = Payload(next(self.payload_ids), client, version, kind, size,
-                          ready, count, done)
+        payload = self._payload(client, version, kind, size, ready, done)
         self.call_at(ready, self._start_upload, payload, at_gateway)
+
+    def _payload(self, client, version, kind, size, ready, done):
+        if size <= 0:
+            raise ValueError('A payload must contain at least one byte')
+        count = (size + self.chunk_bytes - 1) // self.chunk_bytes
+        return Payload(next(self.payload_ids), client, version, kind, size,
+                       ready, count, done)
+
+    def _chunks(self, payload):
+        for index, offset in enumerate(range(0, payload.size, self.chunk_bytes)):
+            yield index, min(self.chunk_bytes, payload.size - offset)
 
     def _start_upload(self, payload, at_gateway):
         at = self.now
         if not at_gateway:
             at = max(at, self.access_free.get(payload.client, 0))
         rate = self.access_mbps.get(payload.client, 100) * 1e6
-        for index, offset in enumerate(range(0, payload.size, self.chunk_bytes)):
-            size = min(self.chunk_bytes, payload.size - offset)
+        for index, size in self._chunks(payload):
             if not at_gateway:
                 at += size * 8 / rate
             chunk = Chunk(payload, index, size, at, next(self.sequence))
-            self.call_at(at, self.queues[payload.kind].append, chunk)
+            self.call_at(at, self._enqueue, chunk, at_gateway)
         if not at_gateway:
             self.access_free[payload.client] = at
 
-    def download(self, size, done):
-        self.down_free = max(self.now, self.down_free) + size * 8 / self.down_rate
-        self.call_at(self.down_free, self._finish_download, size, done)
+    def _enqueue(self, chunk, at_gateway):
+        if not at_gateway:
+            self.bytes['access'] += chunk.size
+        self.queues[chunk.payload.kind].append(chunk)
 
-    def _finish_download(self, size, done):
-        self.bytes['download'] += size
-        self.downloads += 1
-        done(self.now)
+    def download(self, client, version, size, done):
+        payload = self._payload(client, version, 'download', size, self.now, done)
+        start = max(self.now, self.down_free)
+        total = 0
+        for index, chunk_size in self._chunks(payload):
+            total += chunk_size
+            self.down_free = start + total * 8 / self.down_rate
+            chunk = Chunk(payload, index, chunk_size, self.now, next(self.sequence))
+            self.call_at(self.down_free, self._finish_download, chunk)
+
+    def _finish_download(self, chunk):
+        payload = chunk.payload
+        self.bytes['download'] += chunk.size
+        payload.remaining -= 1
+        if payload.remaining == 0:
+            self.downloads += 1
+            payload.done(self.now)
 
     def observe(self, delay):
         old = self.rho
@@ -171,10 +194,9 @@ class Gateway:
             payload.done(self.now)
 
     def run(self):
-        tick = 1
         while self.events:
             arrival = self.events[0][0]
-            sample = tick * self.interval if self.policy == 'adaptive' else math.inf
+            sample = self.tick * self.interval if self.policy == 'adaptive' else math.inf
             self.now = min(arrival, sample)
             while self.events and self.events[0][0] <= self.now:
                 _, _, callback, args = heapq.heappop(self.events)
@@ -182,15 +204,24 @@ class Gateway:
             if sample <= self.now:
                 normal = self.queues['normal']
                 self.observe(self.now - normal[0].queued if normal else None)
-                tick += 1
+                self.tick += 1
             self._dispatch()
 
     def report(self):
         waits = sorted(self.waits)
+        latencies = {}
+        for kind in ('normal', 'spec'):
+            values = sorted(item['latency_s'] for item in self.updates
+                            if item['kind'] == kind)
+            latencies[kind] = {'count': len(values),
+                               'mean_s': mean(values) if values else None,
+                               'p95_s': values[math.ceil(.95 * len(values)) - 1]
+                               if values else None}
         return {
             'normal_chunk_queue_mean_s': mean(waits) if waits else None,
             'normal_chunk_queue_p95_s': waits[math.ceil(0.95 * len(waits)) - 1]
             if waits else None,
             'bytes': self.bytes, 'updates': self.updates,
+            'update_latency': latencies,
             'downloads': self.downloads, 'rho_history': self.rho_history,
         }

@@ -23,6 +23,9 @@ class GradPredictor(BasePredictor):
         self.scheduler = get_scheduler(optimizer=self.optimizer, **self.cfg.scheduler[0])
 
         self.device = self.cfg.device
+        self.traffic_seed = config.seed if config.traffic.enabled else None
+        if config.traffic.enabled and not config.use_gpu:
+            self.server_device = self.device = 'cpu'
         self.pre_seq_length = self.cfg.pre_seq_length // self.cfg.sum_seq_length
         self.aft_seq_length = self.cfg.aft_seq_length // self.cfg.sum_seq_length
         self.epochs = self.cfg.epochs
@@ -71,6 +74,9 @@ class GradPredictor(BasePredictor):
                    DataLoader(val_dataset, batch_size=32, shuffle=True, drop_last=False)
         
     def train(self):
+        if self.traffic_seed is not None:
+            np.random.seed(self.traffic_seed)
+            torch.manual_seed(self.traffic_seed)
         self.logger = self._setup_logger(self.cfg.type)
         while True:
             if not self.data_channel.empty():

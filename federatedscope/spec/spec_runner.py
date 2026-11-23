@@ -1,14 +1,38 @@
 import sys
 import pickle
+from time import perf_counter
 from collections import defaultdict
 from federatedscope.core.fed_runner import StandaloneRunner
 from federatedscope.core.workers import Client, Server
 from federatedscope.core.auxiliaries.model_builder import get_model
 from federatedscope.core.trainers.utils import calculate_batch_epoch_num
+from federatedscope.spec.traffic_runner import TrafficOutbox, TrafficRun
 
 class SpecStandaloneRunner(StandaloneRunner):
     def __init__(self, data, server_class=Client, client_class=Server, config=None, client_configs=None):
         super().__init__(data, server_class, client_class, config, client_configs)
+
+    def _make_comm_queue(self):
+        if self.cfg.traffic.enabled:
+            return TrafficOutbox()
+        return super()._make_comm_queue()
+
+    def _run_simulation(self):
+        if not self.cfg.traffic.enabled:
+            return super()._run_simulation()
+
+        traffic = TrafficRun(self.cfg, self._handle_msg)
+        self.server.traffic_run = traffic
+        start = perf_counter()
+        try:
+            traffic.run(self.shared_comm_queue)
+            if traffic.completed_rounds != self.server.total_round_num:
+                raise RuntimeError('Traffic events exhausted before the round budget')
+            if self.cfg.spec.use:
+                self.server.join_traffic_predictor()
+        finally:
+            traffic.save(self.cfg.outdir, perf_counter() - start,
+                         self.server.total_round_num)
     
     def _get_server_args(self, resource_info=None, client_resource_info=None):
         if self.server_id in self.data:

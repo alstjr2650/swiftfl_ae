@@ -32,7 +32,9 @@ if __name__ == '__main__':
     init_cfg.merge_from_list(cfg_opt)
     if init_cfg.spec.use and init_cfg.federate.process_num <= 1:
         torch.multiprocessing.set_start_method('spawn')
-        torch.multiprocessing.set_sharing_strategy('file_system')
+        if not init_cfg.traffic.enabled or 'file_system' in \
+                torch.multiprocessing.get_all_sharing_strategies():
+            torch.multiprocessing.set_sharing_strategy('file_system')
     update_logger(init_cfg, clear_before_add=True)
     setup_seed(init_cfg.seed)
 
@@ -47,8 +49,12 @@ if __name__ == '__main__':
     # federated dataset might change the number of clients
     # thus, we allow the creation procedure of dataset to modify the global
     # cfg object
+    if init_cfg.traffic.enabled:
+        setup_seed(1234)
     data, modified_cfg = get_data(config=init_cfg.clone(),
                                   client_cfgs=client_cfgs)
+    if init_cfg.traffic.enabled:
+        setup_seed(init_cfg.seed)
     init_cfg.merge_from_other_cfg(modified_cfg)
 
     save_config(args.cfg_file, init_cfg.outdir)

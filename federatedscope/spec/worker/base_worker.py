@@ -30,6 +30,8 @@ class baseClient(Client):
             comp_speed=self.comp_speed,
             comm_bandwidth=self.comm_bandwidth,
             augmentation_factor=self.augmentation_factor)
+        if self._cfg.traffic.enabled:
+            comm_cost = 0
         
         if init_timestamp >= self.cur_timestamp:
             self.cur_timestamp = init_timestamp + comp_cost + comm_cost
@@ -56,6 +58,7 @@ class baseServer(Server):
         self.client_duration_info = kwargs['client_duration_info']
         self.client_data_size = kwargs['client_data_size']
         self.train_size_per_round = kwargs['train_size_per_round']
+        self.traffic_run = None
 
     def check_buffer(self, cur_round, min_received_num, check_eval_result=False, update_waiting=True):
         buffer_flag =  super().check_buffer(cur_round, min_received_num, check_eval_result)
@@ -100,10 +103,16 @@ class baseServer(Server):
 
         move_on_flag = True  # To record whether moving to a new training
         # round or finishing the evaluation
+        if self.traffic_run and not check_eval_result:
+            normal_buffer = self.msg_buffer['train'].get(self.state, {})
+            self.traffic_run.observe_round(self.state, normal_buffer,
+                                           min_received_num)
         if self.check_buffer(self.state, min_received_num, check_eval_result):
             if not check_eval_result:
                 # Receiving enough feedback in the training process
                 aggregated_num = self._perform_federated_aggregation()
+                if self.traffic_run:
+                    self.traffic_run.aggregated(self.state, normal_buffer)
                 self.state += 1
                 if self.state % self._cfg.eval.freq == 0 \
                     and self.state != self.total_round_num \
@@ -283,6 +292,8 @@ class baseServer(Server):
                     eval_metrics = trainer.evaluate(
                         target_data_split_name=split)
                     metrics.update(**eval_metrics)
+                if self.traffic_run:
+                    self.traffic_run.evaluate(self.state, metrics)
                 formatted_eval_res = self._monitor.format_eval_res(
                     metrics,
                     rnd=self.state,
@@ -375,6 +386,9 @@ class baseServer(Server):
             ]
         else:
             client_resource = self.client_duration_info
+            if self.traffic_run and self._cfg.federate.sampler == 'spec_opt':
+                client_resource = {'duration_info': self.client_duration_info,
+                                   'data_size': self.client_data_size}
 
         if self.sampler is None:
             self.sampler = get_sampler(
@@ -382,3 +396,14 @@ class baseServer(Server):
                 client_num=self.client_num,
                 client_info=client_resource,
                 cfg=self._cfg)
+
+    def _sample_model_receivers(self, sample_client_num):
+        if self.traffic_run and self._cfg.federate.sampler == 'spec_opt':
+            return self._sample_swiftfl_normal(sample_client_num)
+        return super()._sample_model_receivers(sample_client_num)
+
+    def _sample_swiftfl_normal(self, sample_client_num):
+        if self._cfg.spec.start_spec_round < self.state < self._cfg.spec.recover_round:
+            return self.sampler.sample(size=sample_client_num,
+                                       sample_type='random_topk')
+        return self.sampler.sample(size=sample_client_num)

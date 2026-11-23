@@ -147,3 +147,6 @@ data/femnist/*
 environment/
 /ygtest/
 *.zip
+/.traffic-deps/
+/data/traffic_femnist/
+/data/traffic_synthetic/

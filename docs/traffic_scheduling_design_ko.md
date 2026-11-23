@@ -23,3 +23,37 @@ FIFO는 공용 큐 도착 순, strict는 chunk 경계에서 normal 우선이다.
 normal chunk의 게이트웨이 대기 평균과 p95, 종류별 준비→서버 전체 수신 지연, 실제 바이트, ρ 시계열, 라운드별 두 정원 충족과 집계 시각을 저장한다. speculative 다운로드가 클라이언트 학습을 실행한 횟수와 모델 반영 경로가 완료된 고유 (버전, 클라이언트) 집합을 따로 센다. 동일 seed별 분할과 장치 정보로 각 방식을 새로 학습한다. FEMNIST의 검증 분할을 확보하고 서버에서 집계하며 최초 validation 목표 도달 시각과 예산 마지막 평가의 test accuracy를 기록한다.
 
 normal 지연 개선만으로는 집계 시각이 앞당겨지지 않는다. 두 정원이 필요한 라운드는 느린 정원이 병목이다. 슬라이드 5에서 10 Mbps로 각 1,000,000 bytes를 전송하면 normal 완료는 FIFO 1.60초, strict 0.80초지만 두 정원 완료와 집계 가능 시각은 모두 1.60초다. 실제 학습에서 업로드가 준비되는 시각이 서로 다르면 두 정원 중 늦은 결과가 달라질 수 있다. 검증 목표 도달 시간은 평가 시각과 최적화 경로에도 의존한다.
+
+공식 `make_global_eval` 경로는 normal 평가 모델을 사용한다. speculative 반영 수는 `spec_model`에 집계되고 결합된 업데이트를 센다. 이 모델은 이후 speculative 작업에 쓰인다. 따라서 지연 개선을 확인하더라도 평가 모델이나 TTA의 개선을 별도로 검증해야 한다. ρ 시계열은 초기값과 변화 시각을 저장한다. p95는 nearest-rank 방식이며, access 바이트와 공용 uplink 바이트는 링크별로 기록한다. `runner_wall_s`는 standalone 루프와 Predictor 종료 정리를 포함하고, `experiment_wall_s`는 데이터 로딩과 초기화부터 학습 프로세스가 종료될 때까지 잰다.
+
+## 실험 재현
+
+`scripts/run_traffic_experiment.py`는 공식 예제 YAML을 기반으로 `traffic.enabled=True`를 지정한다. 기본값인 `False`에서는 기존 standalone 전달 루프를 사용한다. FEMNIST의 train/validation/test 비율을 70/10/20으로 조정하고 기존 캐시와 섞이지 않도록 `data/traffic_femnist`를 사용한다. 데이터 전처리 seed는 1234로 고정한다. 실험 seed는 장치 표본, 클라이언트 선택, 학습 및 별도 Predictor 프로세스에 적용한다. 공식 Predictor의 비동기 요청과 동기화 동작을 유지하므로 운영체제와 PyTorch 환경에 따라 학습 반복 횟수나 수치에 차이가 날 수 있다. FedAvg는 같은 normal 선택 규칙과 장치 특성을 적용하고 speculative 학습을 시작하지 않는다. 각 결과의 `rounds[].normal_clients`로 실제 sampling을 검증할 수 있다.
+
+PyTorch와 저장소 의존성이 있는 PowerShell에서 실행한다. CPU 환경에서는 아래처럼 `--cpu`를 전달한다.
+
+```powershell
+python -m unittest discover -s tests -v
+python scripts/run_traffic_experiment.py smoke --cpu
+python scripts/run_traffic_experiment.py pilot --cpu
+python scripts/run_traffic_experiment.py compare --cpu
+python scripts/run_traffic_experiment.py full --cpu
+```
+
+`smoke`는 합성 LEAF 입력에서 실제 ConvNet2와 공식 SwiftFL worker를 10라운드 실행한다. `pilot`은 실제 FEMNIST에서 adaptive 한 방식을, `compare`는 5개 방식 모두를 새로 학습한다. 두 명령의 기본 조건은 H, 30 Mbps, seed 12345, 10라운드, validation 목표 70%다. `full`은 500라운드 예산에서 seed 12345/12346/12347, H/X/D, 10/30/100 Mbps, 5개 방식을 실행한다. D의 기본 용량 감소 구간은 시뮬레이션 15~45초이며 `--drop-start`와 `--drop-end`로 변경할 수 있다. 결과는 `exp/traffic/<단계>/femnist/<실험명>/traffic_metrics.json`에 기록된다.
+
+## 확인한 결과
+
+네트워크 및 측정 단위 테스트 9개를 통과했다. 실제 standalone smoke는 10라운드를 완료하고 speculative 업데이트 6개를 반영했다. 실제 FEMNIST adaptive pilot도 speculative 업데이트 6개를 반영했다. 시뮬레이션 시간은 845.58초, CPU에서 데이터 로딩을 포함한 실행시간은 72.32초였다.
+
+실제 FEMNIST 다섯 방식 비교에서 10라운드 모두의 normal 클라이언트 ID가 일치했다. 아래 결과는 H·30 Mbps·seed 12345이며, 전체 지표는 `exp/traffic/compare/summary_H_30mbps_s12345_r10.csv`와 각 실행의 JSON에 있다.
+
+| 방식 | normal chunk 대기 평균 / p95 (초) | 최종 집계 (시뮬레이션 초) | 최종 test accuracy |
+| --- | ---: | ---: | ---: |
+| SwiftFL FIFO | 13.87 / 28.24 | 845.58 | 18.55% |
+| SwiftFL strict priority | 13.87 / 28.24 | 845.58 | 18.55% |
+| SwiftFL fixed share | 14.38 / 32.17 | 845.58 | 18.55% |
+| SwiftFL adaptive share | 13.94 / 28.77 | 845.58 | 18.55% |
+| FedAvg | 13.87 / 28.24 | 803.31 | 14.72% |
+
+Adaptive의 normal 대기 p95는 fixed보다 낮았고 FIFO보다 높았다. 네 SwiftFL 방식 모두 0 기반 라운드 8과 9에서 마지막 speculative 결과를 받은 직후 집계했다. 다섯 방식 모두 validation 70% 목표에 미도달했다. 3개 seed의 전체 행렬은 위 실행 명령으로 재현할 수 있다.

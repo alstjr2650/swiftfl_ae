@@ -160,8 +160,11 @@ class CN(CfgNode):
         Clean the un-used secondary-level CfgNode, whose ``.use`` \
         attribute is ``True``
         """
-        for v in self.values():
+        for key, v in self.items():
             if isinstance(v, CfgNode) or isinstance(v, CN):
+                if key == 'spec' and self.get('traffic', {}).get('enabled', False):
+                    # The paired FedAvg run shares SwiftFL's normal sampler.
+                    continue
                 # sub-config
                 if hasattr(v, "use") and v.use is False:
                     for k in copy.deepcopy(v).keys():
