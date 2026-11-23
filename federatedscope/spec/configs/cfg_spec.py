@@ -2,6 +2,24 @@ from federatedscope.core.configs.config import CN
 from federatedscope.register import register_config
 
 def extend_spec_cfg(cfg):
+    cfg.traffic = CN()
+    cfg.traffic.enabled = False
+    cfg.traffic.policy = 'fifo'
+    cfg.traffic.profile = 'H'
+    cfg.traffic.shared_mbps = 30
+    cfg.traffic.chunk_bytes = 16384
+    cfg.traffic.drop_start_s = 15.0
+    cfg.traffic.drop_end_s = 45.0
+    cfg.traffic.rho = 0.30
+    cfg.traffic.rho_min = 0.05
+    cfg.traffic.rho_max = 0.80
+    cfg.traffic.interval_s = 0.1
+    cfg.traffic.low_s = 0.1
+    cfg.traffic.high_s = 0.3
+    cfg.traffic.increase = 0.05
+    cfg.traffic.decrease = 0.5
+    cfg.traffic.target_val_acc = 0.70
+
     cfg.spec = CN()
     cfg.spec.use = False
     cfg.spec.warm_round = 1
@@ -47,6 +65,19 @@ def extend_spec_cfg(cfg):
 
 
     cfg.register_cfg_check_fun(assert_spec_cfg)
+    cfg.register_cfg_check_fun(assert_traffic_cfg)
+
+
+def assert_traffic_cfg(cfg):
+    if cfg.traffic.enabled:
+        assert cfg.federate.mode.lower() == 'standalone'
+        assert cfg.federate.process_num <= 1
+        assert cfg.federate.method.lower() in ('idpspec', 'fedavg')
+        assert not (cfg.federate.online_aggr or cfg.asyn.use
+                    or cfg.vertical.use or cfg.federate.use_ss)
+        assert cfg.traffic.profile in ('H', 'X', 'D')
+        assert cfg.traffic.shared_mbps in (10, 30, 100)
+        assert 0 <= cfg.traffic.target_val_acc <= 1
 
 def assert_spec_cfg(cfg):
     if not cfg.spec.use:

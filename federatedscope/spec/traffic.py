@@ -141,7 +141,9 @@ class Gateway:
             queue = normal or spec
             self.balance = 0.0
         elif self.policy == 'fifo':
-            queue = normal if normal[0].order < spec[0].order else spec
+            normal_key = (normal[0].queued, normal[0].order)
+            spec_key = (spec[0].queued, spec[0].order)
+            queue = normal if normal_key < spec_key else spec
         elif self.policy == 'strict':
             queue = normal
         else:

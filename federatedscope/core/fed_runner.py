@@ -292,7 +292,7 @@ class StandaloneRunner(BaseRunner):
         To set up server and client for standalone mode.
         """
         self.is_run_online = True if self.cfg.federate.online_aggr else False
-        self.shared_comm_queue = deque()
+        self.shared_comm_queue = self._make_comm_queue()
 
         if self.cfg.backend == 'torch':
             import torch
@@ -356,6 +356,9 @@ class StandaloneRunner(BaseRunner):
         if trainer_representative is not None and hasattr(
                 trainer_representative, 'print_trainer_meta_info'):
             trainer_representative.print_trainer_meta_info()
+
+    def _make_comm_queue(self):
+        return deque()
 
     def _get_server_args(self, resource_info=None, client_resource_info=None):
         if self.server_id in self.data:
