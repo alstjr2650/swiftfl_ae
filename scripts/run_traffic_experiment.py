@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from time import perf_counter
 
+from traffic_dependencies import use_workspace_dependencies
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODES = ('fifo', 'strict', 'fixed', 'adaptive', 'fedavg')
@@ -40,6 +42,7 @@ def main():
     parser.add_argument('--drop-end', type=float, default=45.0)
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
+    use_workspace_dependencies()
     full = args.stage == 'full'
     smoke = args.stage == 'smoke'
     rounds = args.rounds if args.rounds is not None else (500 if full else 10)
